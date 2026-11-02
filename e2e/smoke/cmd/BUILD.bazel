@@ -1,23 +1,14 @@
-load("@bazel_gowire//rules:gowire.bzl", "gowire")
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 
-gowire(
-    name = "wire",
-    srcs = ["wire.go"],
-    deps = [
-        "@com_github_google_wire//wire",
-    ],
+go_library(
+    name = "go_default_library",
+    srcs = ["main.go"],
+    importpath = "github.com/qhai-dev/wire.bzl/e2e/smoke/cmd",
+    visibility = ["//visibility:private"],
 )
 
 go_binary(
     name = "app",
     embed = [":go_default_library"],
     visibility = ["//visibility:public"],
-)
-
-go_library(
-    name = "go_default_library",
-    srcs = ["main.go"],
-    importpath = "github.com/qhai-dev/bazel_gowire/e2e/smoke/cmd",
-    visibility = ["//visibility:private"],
 )

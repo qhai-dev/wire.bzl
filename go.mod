@@ -1,4 +1,4 @@
-module github.com/qhai-dev/bazel_gowire
+module github.com/qhai-dev/wire.bzl
 
 go 1.27.3
 

@@ -3,5 +3,8 @@
         "build.buildFlags": [
             "-tags=wireinject"
         ]
-    }
+    },
+    "cSpell.words": [
+        "qhai"
+    ]
 }

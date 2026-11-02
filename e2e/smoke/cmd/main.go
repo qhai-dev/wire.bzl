@@ -1,9 +1,14 @@
 package main
 
-import (
-	"fmt"
-)
+import "log"
 
 func main() {
-	fmt.Println("hello")
+	app, err := InitializeApp()
+	if err != nil {
+		log.Fatalf("initialize app failed: %v", err)
+	}
+
+	if err := app.Run(); err != nil {
+		log.Fatalf("run app failed: %v", err)
+	}
 }

@@ -3,6 +3,6 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "framework",
     srcs = ["app.go"],
-    importpath = "github.com/qhai-dev/bazel_gowire/e2e/framework",
+    importpath = "github.com/qhai-dev/wire.bzl/e2e/smoke/pkg/framework",
     visibility = ["//visibility:public"],
 )

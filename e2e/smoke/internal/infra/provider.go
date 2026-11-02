@@ -2,4 +2,8 @@ package infra
 
 import "github.com/google/wire"
 
-var ProviderSet = wire.NewSet()
+func NewMessage() string {
+	return "Hello, Wire!"
+}
+
+var ProviderSet = wire.NewSet(NewMessage)

@@ -1,4 +1,4 @@
-module github.com/qhai-dev/bazel_gowire/e2e/smoke
+module github.com/qhai-dev/wire.bzl/e2e/smoke
 
 go 1.27.3
 

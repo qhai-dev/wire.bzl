@@ -3,7 +3,10 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "adapter",
     srcs = ["provider.go"],
-    importpath = "github.com/qhai-dev/bazel_gowire/e2e/smoke/internal/adapter",
-    visibility = ["//visibility:public"],
-    deps = ["@com_github_google_wire//:wire"],
+    importpath = "github.com/qhai-dev/wire.bzl/e2e/smoke/internal/adapter",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/application",
+        "@com_github_google_wire//:wire",
+    ],
 )

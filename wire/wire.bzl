@@ -115,7 +115,7 @@ def _copy_commands(dest_dir, files):
         )
     return commands
 
-def _gowire_impl(ctx):
+def _wire_impl(ctx):
     go = go_context(ctx, include_deprecated_properties = False)
     sdk = go.sdk
 
@@ -212,8 +212,8 @@ def _gowire_impl(ctx):
 
     return [DefaultInfo(files = depset([ctx.outputs.out]))]
 
-_gowire = rule(
-    implementation = _gowire_impl,
+_wire = rule(
+    implementation = _wire_impl,
     attrs = {
         "srcs": attr.label_list(
             allow_files = [".go"],
@@ -259,7 +259,7 @@ _gowire = rule(
     toolchains = [_GO_TOOLCHAIN],
 )
 
-def gowire(name, srcs, deps = [], out = "wire_gen.go", header_file = None, importpath = "", wire_tags = [], wire_tool = None, **kwargs):
+def wire(name, srcs, deps = [], out = "wire_gen.go", header_file = None, importpath = "", wire_tags = [], wire_tool = None, **kwargs):
     """Generates `wire_gen.go` from the injectors declared in `srcs`.
 
     The generated file is exposed as the default output of this target, so it
@@ -308,7 +308,7 @@ def gowire(name, srcs, deps = [], out = "wire_gen.go", header_file = None, impor
         fail("gowire: out must be a file in the current package, got {}".format(out))
     if wire_tool == None:
         wire_tool = _DEFAULT_WIRE_TOOL
-    _gowire(
+    _wire(
         name = name,
         srcs = srcs,
         deps = deps,

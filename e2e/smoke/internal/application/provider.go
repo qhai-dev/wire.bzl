@@ -1,5 +1,14 @@
 package application
 
-import "github.com/google/wire"
+import (
+	"github.com/google/wire"
+)
 
-var ProviderSet = wire.NewSet()
+type Service struct {
+}
+
+func NewService() *Service {
+	return &Service{}
+}
+
+var ProviderSet = wire.NewSet(NewService)
