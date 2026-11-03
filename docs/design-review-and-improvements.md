@@ -31,7 +31,6 @@ wire_gen(
     srcs = ["wire.go"],
     deps = ["//internal/server", "@com_github_google_wire//wire"],
     importpath = "github.com/example/app/cmd",
-    output = "wire_gen.go",   # 可选，默认 "wire_gen.go"
 )
 
 go_library(
@@ -55,12 +54,76 @@ go_binary(
 | `srcs` | `.go` 文件列表 | 是 | | 注入器声明文件（带 `wireinject` build tag） |
 | `deps` | Go 库列表 | 否 | `[]` | 提供类型信息给 Wire 做依赖解析的传递依赖 |
 | `importpath` | String | 否 | `""` | 当前包的 Go import path；空时尝试从 deps 推断 |
-| `output` | String | 否 | `"wire_gen.go"` | 输出文件名，必须以 `.go` 结尾 |
 | `header_file` | Label | 否 | `None` | 插入到生成文件头部的文件 |
 | `wire_tags` | String 列表 | 否 | `[]` | 额外的 build tags，传给 `wire gen -tags` |
 | `wire_tool` | Label | 否 | Wire 默认工具 | 可选覆盖 Wire 可执行文件 |
 
-### 1.3 与 `deps` 重复声明的处理
+> **输出文件名固定为 `wire_gen.go`，不可配置。** 与 Wire 官方约定一致，
+> 不提供 `output` / `out` 属性。
+
+### 1.3 多入口项目布局（`cmd/` 多子目录）
+
+Go 项目常见 `cmd/` 下有多个启动入口（`cmd/api`、`cmd/worker`、`cmd/cli`），
+每个目录都有自己的 `wire.go` 和 `wire_gen.go`。
+
+**对 Bazel 没有影响。** 每个目录是一个独立的 Bazel package，`wire_gen` 的输出
+路径自动带上 package 前缀，不会冲突：
+
+```text
+cmd/
+  api/
+    BUILD.bazel     → wire_gen(name="wire_gen") → cmd/api/wire_gen.go
+    main.go
+    wire.go
+  worker/
+    BUILD.bazel     → wire_gen(name="wire_gen") → cmd/worker/wire_gen.go
+    main.go
+    wire.go
+  cli/
+    BUILD.bazel     → wire_gen(name="wire_gen") → cmd/cli/wire_gen.go
+    main.go
+    wire.go
+```
+
+Bazel 的 action 输出路径结构为 `bazel-out/<config>/bin/<package>/<filename>`，
+因此三个 `wire_gen.go` 的实际存储路径完全不同：
+
+```text
+bazel-out/k8-fastbuild/bin/cmd/api/wire_gen.go
+bazel-out/k8-fastbuild/bin/cmd/worker/wire_gen.go
+bazel-out/k8-fastbuild/bin/cmd/cli/wire_gen.go
+```
+
+每个 `BUILD.bazel` 示例：
+
+```starlark
+# cmd/api/BUILD.bazel
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@wire.bzl//wire:defs.bzl", "wire_gen")
+
+wire_gen(
+    name = "wire_gen",
+    srcs = ["wire.go"],
+    deps = ["//internal/api/server", "@com_github_google_wire//wire"],
+    importpath = "github.com/example/app/cmd/api",
+)
+
+go_library(
+    name = "go_default_library",
+    srcs = ["main.go", ":wire_gen"],
+    deps = ["//internal/api/server", "@com_github_google_wire//wire"],
+    importpath = "github.com/example/app/cmd/api",
+    visibility = ["//visibility:private"],
+)
+
+go_binary(
+    name = "api",
+    embed = [":go_default_library"],
+    visibility = ["//visibility:public"],
+)
+```
+
+### 1.4 与 `deps` 重复声明的处理
 
 `wire_gen` 和 `go_library` 需要声明相同的 `deps`，这是 Bazel Go 代码生成的常态模式
 （`go_proto_library` + `go_library` 也有同样的重复）。
@@ -75,7 +138,7 @@ go_binary(
 | `wire_library` 高层宏包装一切 | 创建影子规则，用户困惑"该用 `go_library` 还是 `wire_library`" |
 | Starlark 变量消除重复 | 仅适用于小规模项目，不解决根本问题 |
 
-### 1.4 命名体系统一
+### 1.5 命名体系统一
 
 | 符号 | 说明 |
 | --- | --- |
@@ -659,6 +722,7 @@ gazelle = use_extension("@gazelle//:extensions.bzl", "gazelle")
 | `wire_go_library` 命名 | 不采用 | 暗示是特殊的 library，实际展开后就是 `go_library` |
 | Starlark 变量消除 deps 重复 | 不作为方案 | 仅适用于小规模，不解决根本问题 |
 | 高层宏 + 低层规则双层 API | 不采用 | 简单场景用 `wire_gen` 就够了 |
+| `output` / `out` 可配置属性 | 不采用 | 输出永远固定为 `wire_gen.go`，与 Wire 官方约定一致 |
 
 ### 采纳的方案
 
