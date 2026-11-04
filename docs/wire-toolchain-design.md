@@ -1,0 +1,335 @@
+# Wire 工具链设计：从 go.mod 依赖构建 `wire` 可执行文件
+
+| 状态 | 设计日期 | 目标版本 |
+| --- | --- | --- |
+| Draft，等待评审 | 2026-11-04 | `v0.1.0` |
+
+## 背景与问题
+
+Google Wire **官方不发布预编译二进制**。仓库 [google/wire](https://github.com/google/wire)
+只提供 Go 源码，历史上的安装方式是：
+
+```bash
+go install github.com/google/wire/cmd/wire@latest
+```
+
+这对 Bazel 集成来说是不可接受的：
+
+1. `@latest` 不可复现，违反 hermetic 构建原则
+2. 依赖网络访问和用户的 module cache
+3. 与项目锁定的 Wire 版本可能不一致（生成器版本 ≠ 运行时库版本）
+4. 无法参与 Bazel 的远程缓存和 action 图
+
+**核心结论：`wire` 可执行文件必须由项目自己的构建系统从 Go module 源码编译出来，
+且编译所用的源码版本必须与项目 `go.mod` 中锁定的 `github.com/google/wire` 版本一致。**
+
+本项目 `go.mod` 已经具备这个条件：
+
+```
+require github.com/google/wire v0.7.0
+tool github.com/google/wire/cmd/wire
+```
+
+`tool` 指令（Go 1.24+）把 `cmd/wire` 显式登记为项目工具依赖，使其版本被
+`go.mod` / `go.sum` 锁定，不会被 `go mod tidy` 移除。这与 Bazel 侧的版本锁定
+形成同一个事实来源。
+
+---
+
+## 一、源码获取链路
+
+Bazel 侧不需要自己下载 Wire 源码，而是复用 Gazelle 的 `go_deps` 扩展：
+
+```text
+go.mod / go.sum（版本锁定的唯一来源）
+    ↓  go_deps.from_file(go_mod = "//:go.mod")
+下载 Go module zip（Bazel repository phase，非 action phase）
+    ↓
+生成外部仓库 @com_github_google_wire（含自动生成的 BUILD.bazel）
+    ↓  rules_go 编译
+@com_github_google_wire//cmd/wire  →  wire 可执行文件
+    ↓  wire_gen action 的 exec 工具
+执行 wire gen，产出 wire_gen.go
+```
+
+关键分工：
+
+| 阶段 | 职责 | 是否访问网络 |
+| --- | --- | --- |
+| Repository phase（`go_deps`） | 下载 module 源码、生成 BUILD 元数据 | 是（一次性，进 Bazel repository cache） |
+| Analysis phase | 解析工具链、构建 action 图 | 否 |
+| Execution phase（`wire_gen` action） | 运行已编译的 `wire`，生成代码 | **否**（必须 `GOPROXY=off`） |
+
+这符合 Bazel 的一贯设计：源码下载属于 repository rule，build action 只看到
+已存在的声明输入。`wire_gen` 的 action 内部绝不允许触发下载。
+
+### 为什么不用 `http_archive`
+
+| 问题 | 说明 |
+| --- | --- |
+| 上游无 BUILD 文件 | Wire 仓库没有根级或 `cmd/wire` 的 `BUILD.bazel` |
+| 传递依赖需要手工补齐 | `cmd/wire` 依赖 `x/tools`、`subcommands`、`go-difflib` 等 |
+| 版本双轨 | `http_archive` 的版本与 `go.mod` 锁定的版本可能漂移 |
+| 重复实现 module 解析 | 等于把 `go_deps` 的逻辑重写一遍 |
+
+`go_deps` / `go_repository` 是 Bazel Go 生态处理"只有 Go 源码、没有 BUILD 文件"
+仓库的标准入口，且天然与 `go.mod` 版本对齐。
+
+### 仓库名映射
+
+`go_deps` 按 Gazelle 约定把 module path 转成仓库名：
+
+```text
+github.com/google/wire  →  com_github_google_wire
+```
+
+因此工具目标是 `@com_github_google_wire//cmd/wire`。
+
+**注意：** 仓库名由 `go_deps` 生成规则决定，不是 Wire 项目自己控制的。
+若未来 Gazelle 改变命名约定，或用户使用了自定义 `repo_name`，硬编码的默认值
+会失效。这是引入工具链抽象的主要动机之一（见第三节）。
+
+必须在 `MODULE.bazel` 中显式 `use_repo`，否则仓库对当前模块不可见：
+
+```starlark
+use_repo(go_deps, "com_github_google_wire")
+```
+
+---
+
+## 二、当前实现的问题
+
+现状是 `wire_gen` 规则上有一个 `wire_tool` 属性，默认值硬编码：
+
+```starlark
+_DEFAULT_WIRE_TOOL = Label("@com_github_google_wire//cmd/wire")
+```
+
+| 问题 | 影响 |
+| --- | --- |
+| 默认值硬编码仓库名 | 用户若用自定义 `repo_name`，默认值直接失效 |
+| 每个 target 都要能覆盖 | 多入口项目（`cmd/api`、`cmd/worker`…）需逐个写 `wire_tool` |
+| 无平台感知 | 交叉编译场景下无法按 exec platform 选择工具 |
+| 无组织级管控 | 无法在 monorepo 根统一锁定 Wire 版本 |
+| 错误信息差 | 仓库不存在时报"label not found"，不指向真实原因 |
+
+---
+
+## 三、工具链设计方案
+
+采用 Bazel 标准的 **toolchain type + toolchain rule + toolchain resolution** 三段式。
+
+### 3.1 组件划分
+
+```text
+wire/BUILD.bazel
+    └── toolchain_type(name = "wire_toolchain_type")     ← 抽象标识
+
+wire/toolchain.bzl
+    └── wire_toolchain rule                              ← 包装具体 wire 二进制
+        provides: platform_common.ToolchainInfo(wire = <executable>)
+
+用户仓库（或本仓库提供默认）
+    └── toolchain(
+            name = "wire_toolchain",
+            toolchain_type = "@wire.bzl//wire:wire_toolchain_type",
+            exec_compatible_with = [...],
+            toolchain = ":wire_toolchain_impl",
+        )
+
+wire_gen rule
+    └── toolchains = ["@wire.bzl//wire:wire_toolchain_type"]
+        ctx.toolchains[...].wire  ← 解析得到可执行文件
+```
+
+### 3.2 `wire_toolchain` rule
+
+```starlark
+# wire/toolchain.bzl
+
+def _wire_toolchain_impl(ctx):
+    return [platform_common.ToolchainInfo(
+        wire = ctx.executable.wire,
+        wire_files = ctx.attr.wire[DefaultInfo].files,
+    )]
+
+wire_toolchain = rule(
+    implementation = _wire_toolchain_impl,
+    attrs = {
+        "wire": attr.label(
+            mandatory = True,
+            executable = True,
+            cfg = "exec",
+            doc = "`github.com/google/wire/cmd/wire` 的编译目标，" +
+                  "通常由 go_deps 提供源码、rules_go 编译。",
+        ),
+    },
+    doc = "包装一个 Wire 可执行文件，供 wire_gen 通过工具链解析获取。",
+)
+```
+
+**`cfg = "exec"` 是关键**：Wire 是构建期工具，必须按执行平台编译，
+而不是按目标平台。否则交叉编译（如 Linux 构建 → darwin/arm64 产物）时
+会尝试运行一个目标平台的二进制而失败。
+
+### 3.3 工具链注册
+
+```starlark
+# 用户仓库 BUILD.bazel
+load("@wire.bzl//wire:toolchain.bzl", "wire_toolchain")
+
+wire_toolchain(
+    name = "wire_toolchain_impl",
+    wire = "@com_github_google_wire//cmd/wire",
+)
+
+toolchain(
+    name = "wire_toolchain",
+    toolchain = ":wire_toolchain_impl",
+    toolchain_type = "@wire.bzl//wire:wire_toolchain_type",
+)
+```
+
+### 3.4 Module extension（推荐入口）
+
+为降低用户配置成本，提供 module extension 自动生成注册仓库：
+
+```starlark
+# wire/extensions.bzl
+
+def _wire_ext_impl(module_ctx):
+    registrations = []
+    for mod in module_ctx.modules:
+        for tc in mod.tags.toolchain:
+            # 生成一个包含 wire_toolchain + toolchain 的仓库
+            ...
+    ...
+
+wire = module_extension(
+    implementation = _wire_ext_impl,
+    tag_classes = {
+        "toolchain": tag_class(attrs = {
+            "wire": attr.label(mandatory = True),
+            "name": attr.string(default = "wire"),
+            "exec_compatible_with": attr.label_list(default = []),
+        }),
+    },
+)
+```
+
+用户配置简化为：
+
+```starlark
+# MODULE.bazel
+wire = use_extension("@wire.bzl//wire:extensions.bzl", "wire")
+wire.toolchain(wire = "@com_github_google_wire//cmd/wire")
+use_repo(wire, "wire_bzl_toolchains")
+register_toolchains("@wire_bzl_toolchains//:all")
+```
+
+### 3.5 `wire_gen` 侧的解析与降级
+
+工具链解析失败时的行为必须明确。设计三级降级：
+
+```text
+1. ctx.toolchains[wire_toolchain_type] 解析成功
+   → 使用该工具链的 wire
+
+2. 未注册任何工具链，但 wire_tool 属性被显式设置
+   → 使用 wire_tool（兼容路径，标记 deprecated）
+
+3. 两者都不可用
+   → analysis 阶段失败，错误信息包含：
+     - 缺失的 toolchain type label
+     - 完整的 MODULE.bazel 注册示例
+     - 提示检查 use_repo(go_deps, "com_github_google_wire") 是否遗漏
+```
+
+保留 `wire_tool` 属性作为逃生舱：用于临时替换成本地 patch 过的 Wire
+（例如调试生成器行为），但不作为主路径。
+
+### 3.6 多版本共存
+
+同一构建图中出现多个不兼容 Wire 版本时（monorepo 中不同子项目锁定不同版本）：
+
+- 通过标准 Bazel toolchain resolution 按 `exec_compatible_with` /
+  `target_compatible_with` 选择一个版本
+- **不提供"最后注册者获胜"的隐式行为**
+- 生成产物内容依赖 Wire 版本，因此远程缓存键必须包含 wire 可执行文件的
+  action key（Bazel 自动覆盖，因为它是 action 的 tool 输入）
+
+---
+
+## 四、版本一致性保障
+
+生成器版本与运行时库版本必须匹配，否则可能出现"生成代码引用了运行时库中
+不存在的 API"。
+
+| 保障手段 | 说明 |
+| --- | --- |
+| 单一 `go.mod` 来源 | `wire` 工具和 `github.com/google/wire` 库来自同一 module 版本 |
+| `tool` 指令锁定 | `tool github.com/google/wire/cmd/wire` 防止 tidy 移除 |
+| `go.sum` 校验 | module zip 完整性由 `go.sum` 保证 |
+| 禁止 `@latest` | `go_deps.module(version = ...)` 只接受精确 Go module 版本 |
+
+用户若尚未在 `go.mod` 中依赖 Wire，需显式声明：
+
+```starlark
+go_deps.module(
+    module = "github.com/google/wire",
+    version = "v0.7.0",
+)
+```
+
+版本必须是精确的 Go module 版本，不接受 `latest` 或分支名。
+
+---
+
+## 五、备选方案对比
+
+| 方案 | 结论 | 原因 |
+| --- | --- | --- |
+| `go install ...@latest` 后引用宿主机二进制 | **不采用** | 不可复现、依赖网络和宿主机状态、无法远程缓存 |
+| `http_archive` 下载 Wire 源码 + 手写 BUILD | **不采用** | 上游无 BUILD 文件，需手工补齐全部传递依赖，版本与 go.mod 双轨 |
+| `go run github.com/google/wire/cmd/wire` | **不采用** | 等价于运行期解析，破坏 action 的声明式输入 |
+| 在 Bazel 中重写 Wire 生成器 | **不采用** | 与官方算法漂移，维护成本极高 |
+| 要求用户提交 `wire_gen.go` | **不作为主流程** | 容易过期，无法保证源码与生成结果一致 |
+| `go_deps` 提供源码 + `rules_go` 编译 + toolchain 注册 | **采用** | 复用 Bazel Go 生态标准链路，版本由 go.mod 单一来源锁定 |
+| rules_go `go_tool` 机制 | **待评估** | 语义上更贴近"go.mod 工具依赖"，但需确认所用 rules_go 版本（本项目 0.65.0）的支持程度与 API 稳定性；若可用，可作为 toolchain 的默认实现底层 |
+
+> `go_tool` 一栏标注为待评估：该机制的设计意图与本需求高度契合
+> （把 go.mod 中的 tool 依赖暴露为 Bazel 可执行目标），但在纳入默认实现前
+> 需要在 rules_go 0.65.0 上实测验证其 exec 平台行为和与 toolchain 的组合方式。
+> 本文档不对其 API 细节做未经验证的断言。
+
+---
+
+## 六、验收标准
+
+工具链方案落地后，必须满足：
+
+1. **零网络构建**：`bazel build` 在 `--sandbox_default_allow_network=false`
+   下成功完成 Wire 生成
+2. **版本一致性**：`wire` 工具与 `github.com/google/wire` 运行时库来自
+   `go.mod` 中的同一版本；可通过 `bazel query` 验证两者指向同一外部仓库
+3. **交叉编译可用**：`--platforms=//platforms:darwin_arm64` 构建 Linux
+   宿主机上的产物时，`wire` 仍按 exec platform（Linux）编译执行
+4. **远程缓存命中**：第二次构建 action 全部 cache hit；修改 `go.mod` 中
+   Wire 版本必须使缓存失效
+5. **错误可定位**：未注册工具链时，报错信息直接给出可复制的 `MODULE.bazel`
+   注册片段，而非底层 label 解析错误
+6. **多版本可控**：同一构建图中注册两个 Wire 版本时，resolution 结果确定
+   且可解释，不出现静默的"最后注册者获胜"
+
+---
+
+## 七、待评审决策
+
+1. 是否接受 toolchain type + module extension 作为主路径，`wire_tool` 降级为
+   deprecated 逃生舱？
+2. 是否由本仓库提供一个"默认工具链"（默认指向 `@com_github_google_wire//cmd/wire`），
+   让用户在未显式注册时也能工作？还是强制要求显式注册以保证可解释性？
+3. 是否先实测 rules_go `go_tool`，若可用则以其作为默认实现底层？
+4. 多版本共存是否需要在 `v0.1.0` 支持，还是仅保证"单版本 + 明确报错"？
+5. `wire` 工具编译失败（例如 Wire 版本与项目 Go SDK 不兼容）时，错误信息
+   是否需要额外包装，还是直接透传 rules_go 的编译错误？

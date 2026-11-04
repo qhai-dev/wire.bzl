@@ -387,6 +387,10 @@ def _resolve_import_path(ctx):
 
 ### 3.2 Toolchain 抽象缺失（中等）
 
+> 完整的工具链设计（含"Wire 官方不提供二进制，如何从 go.mod 依赖构建"的
+> 源码获取链路、版本一致性保障、验收标准）见
+> [`wire-toolchain-design.md`](./wire-toolchain-design.md)。本节仅保留问题摘要。
+
 **现状：** `wire_tool` 属性默认硬编码为 `@com_github_google_wire//cmd/wire`。
 
 **问题：**
