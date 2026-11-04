@@ -295,16 +295,142 @@ go_deps.module(
 | 在 Bazel 中重写 Wire 生成器 | **不采用** | 与官方算法漂移，维护成本极高 |
 | 要求用户提交 `wire_gen.go` | **不作为主流程** | 容易过期，无法保证源码与生成结果一致 |
 | `go_deps` 提供源码 + `rules_go` 编译 + toolchain 注册 | **采用** | 复用 Bazel Go 生态标准链路，版本由 go.mod 单一来源锁定 |
-| rules_go `go_tool` 机制 | **待评估** | 语义上更贴近"go.mod 工具依赖"，但需确认所用 rules_go 版本（本项目 0.65.0）的支持程度与 API 稳定性；若可用，可作为 toolchain 的默认实现底层 |
-
-> `go_tool` 一栏标注为待评估：该机制的设计意图与本需求高度契合
-> （把 go.mod 中的 tool 依赖暴露为 Bazel 可执行目标），但在纳入默认实现前
-> 需要在 rules_go 0.65.0 上实测验证其 exec 平台行为和与 toolchain 的组合方式。
-> 本文档不对其 API 细节做未经验证的断言。
+| rules_go `go_tool` 规则 | **不存在，已实测排除** | rules_go 0.65.0 未导出该符号，详见第六节 |
+| `bazel run @rules_go//go -- tool wire` | **不作为 action 路径** | 实测会在运行期联网下载 module，非 hermetic，详见第六节 |
 
 ---
 
-## 六、验收标准
+## 六、实测验证记录（2026-11-04）
+
+为确认"go.mod 工具依赖如何变成 Bazel 可执行目标"，搭建最小工程实测。
+环境：Bazel 9.2.0、rules_go 0.65.0、gazelle 2.0.0-beta.2、Go SDK 1.27.3，
+`go.mod` 沿用本仓库锁定内容（`github.com/google/wire v0.7.0` + `tool` 指令）。
+
+### 6.1 结论一：rules_go 0.65.0 没有 `go_tool` 规则
+
+在 Bazel 实际下载的 rules_go 源码中检索：
+
+```text
+go/def.bzl 导出的 tool 相关符号仅有：
+    go_toolchain        (//go/private:go_toolchain.bzl)
+    go_tool_library     (go_tool_library)
+
+全仓 grep "go_tool"（排除 go_toolchain / go_tool_library）：0 命中
+```
+
+**`go_tool` 不存在。** 之前文档中标注的"待评估"现已排除，不再作为候选方案。
+
+### 6.2 结论二：真正的机制是 gazelle `go_deps` 解析 `tool` 指令
+
+gazelle `internal/bzlmod/go_deps.bzl` 中确实实现了 go.mod `tool` 指令支持：
+
+```python
+# 解析 go.mod JSON 的 Tool 字段
+tool_importpaths = [tool["Path"] for tool in go_mod_json.get("Tool") or []]
+
+# 建立 tool import path → Bazel label 的映射
+tool_targets, direct_deps, direct_dev_deps = _index_tool_targets(...)
+```
+
+其源码注释明确说明了用途与调用方式：
+
+> A tool target is declared with a `tool` directive in a go.mod file from the
+> root Bazel module. These targets may be run with
+> `bazel run @rules_go//go -- tool <name>` where `<name>` is the last component
+> of the tool's import path, ignoring major version suffixes.
+> We build a map to write to `@bazel_gazelle_go_repository_config` so that
+> `@rules_go//go` knows which target to run.
+
+### 6.3 结论三：label 生成规则（已按源码确认）
+
+`_index_tool_targets` 的 label 拼装逻辑：
+
+| 组成部分 | 取值规则 | 对 wire 的实际取值 |
+| --- | --- | --- |
+| repo | go_deps 仓库名（`github.com/google/wire` → `com_github_google_wire`） | `@com_github_google_wire` |
+| package | module path 之后的子目录 | `cmd/wire` |
+| target name | **import path 的 basename**（即使 basename 与目录同名） | `wire` |
+
+因此 `tool github.com/google/wire/cmd/wire` 对应的 label 是：
+
+```text
+@com_github_google_wire//cmd/wire:wire
+```
+
+注意 target 名是 `:wire` 而非目录隐式名——两者在此处恰好等价
+（`//cmd/wire` 即 `//cmd/wire:wire`），但源码显式使用 basename，
+说明当 Go 包目录名与 `go_binary` 名不一致时不能依赖隐式简写。
+**本项目现有实现的默认值 `Label("@com_github_google_wire//cmd/wire")` 是正确的。**
+
+源码注释还指出一个重要细节：Gazelle 按 import path 最后一段命名 `go_binary`，
+即使该段是主版本后缀（如 `v2`），而工具调用名用后缀之前的名字。
+
+### 6.4 结论四：从 go.mod 锁定源码编译 wire 二进制 — 成功
+
+```text
+$ bazel build @com_github_google_wire//cmd/wire:wire
+
+INFO: Analyzed target @@gazelle++go_deps+com_github_google_wire//cmd/wire:wire
+      (130 packages loaded, 8566 targets configured)
+Target ... up-to-date:
+  bazel-bin/external/gazelle++go_deps+com_github_google_wire/cmd/wire/wire_/wire
+INFO: Elapsed time: 81.855s, Critical Path: 48.70s
+INFO: 43 processes: 14 internal, 29 processwrapper-sandbox.
+INFO: Build completed successfully, 43 total actions
+```
+
+产物验证为可执行的 x86-64 ELF，且子命令完整：
+
+```text
+$ ./wire help
+Usage: wire <flags> <subcommand> <subcommand args>
+Subcommands:
+	check            print any Wire errors found
+	diff             output a diff between existing wire_gen.go files ...
+	gen              generate the wire_gen.go file for each package
+	show             describe all top-level provider sets
+```
+
+**这证明本文第一节的源码获取链路完全可行**：go.mod 锁定版本 → `go_deps` 下载
+module 源码并生成 BUILD → `rules_go` 编译出 `cmd/wire`。传递依赖
+（`x/tools`、`subcommands`、`go-difflib` 等）由 go_deps 自动补齐，无需手工维护。
+
+### 6.5 结论五：`bazel run @rules_go//go -- tool wire` 非 hermetic
+
+实测该官方 tool 运行器：
+
+```text
+$ bazel run @rules_go//go -- tool wire help
+...
+go: downloading github.com/google/wire v0.7.0
+github.com/google/wire/cmd/wire: read .../pkg/mod/cache/download/
+    github.com/google/wire/@v/v0.7.0.zip....tmp: device or resource busy
+```
+
+关键观察：它**委托给真实的 `go` 工具执行 `go tool wire`**，因而在运行期
+从 module proxy 下载源码，而不是复用 Bazel 已编译的产物。
+
+（本次失败原因是环境特定的：GOMODCACHE 落在不支持该操作的 OSS 挂载上。
+但失败本身恰好暴露了该路径的运行期下载行为。）
+
+**设计结论：** `bazel run @rules_go//go -- tool wire` 只适合作为开发者
+本地便利命令，**不能用于 `wire_gen` 的 build action**——它违反 hermetic、
+可远程缓存、构建期零网络三条硬性要求。`wire_gen` 必须直接依赖
+`@com_github_google_wire//cmd/wire:wire` 这个由 rules_go 编译的目标。
+
+### 6.6 对设计的影响
+
+| 设计条目 | 实测后的调整 |
+| --- | --- |
+| 第三节 toolchain 三段式 | **保持不变**，方案成立 |
+| `wire_tool` 默认值 | 确认为 `@com_github_google_wire//cmd/wire:wire`（现有默认值正确） |
+| `go_tool` 作为底层实现 | **移除该候选**，rules_go 无此规则 |
+| 官方 tool 运行器 | 在文档中明确定位为"开发者便利命令"，禁止用于 action |
+| 第七节验收标准第 1 条 | 增加：action 内不得出现 `go tool` / `go run` 调用路径 |
+
+---
+
+## 七、验收标准
 
 工具链方案落地后，必须满足：
 
@@ -323,13 +449,15 @@ go_deps.module(
 
 ---
 
-## 七、待评审决策
+## 八、待评审决策
 
 1. 是否接受 toolchain type + module extension 作为主路径，`wire_tool` 降级为
    deprecated 逃生舱？
 2. 是否由本仓库提供一个"默认工具链"（默认指向 `@com_github_google_wire//cmd/wire`），
    让用户在未显式注册时也能工作？还是强制要求显式注册以保证可解释性？
-3. 是否先实测 rules_go `go_tool`，若可用则以其作为默认实现底层？
+3. ~~是否先实测 rules_go `go_tool`，若可用则以其作为默认实现底层？~~
+   **已实测关闭**：rules_go 0.65.0 无 `go_tool` 规则；官方 `tool` 运行器非
+   hermetic。二者均不纳入实现，详见第六节。
 4. 多版本共存是否需要在 `v0.1.0` 支持，还是仅保证"单版本 + 明确报错"？
 5. `wire` 工具编译失败（例如 Wire 版本与项目 Go SDK 不兼容）时，错误信息
    是否需要额外包装，还是直接透传 rules_go 的编译错误？
