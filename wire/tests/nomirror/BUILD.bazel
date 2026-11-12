@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//wire:defs.bzl", "wire_gen")
+
+# importpath deliberately does NOT mirror the Bazel package path.
+go_library(
+    name = "lib",
+    srcs = ["lib.go"],
+    importpath = "example.com/unrelated/lib",
+    deps = ["@com_github_google_wire//:wire"],
+)
+
+wire_gen(
+    name = "wire_gen",
+    visibility = ["//wire/tests:__pkg__"],
+    srcs = ["wire.go"],
+    deps = [
+        ":lib",
+        "@com_github_google_wire//:wire",
+    ],
+)

@@ -1,0 +1,21 @@
+load(
+    ":wire_gen_tests.bzl",
+    "ambiguous_importpath_fails_test",
+    "output_is_wire_gen_go_test",
+    "uninferable_importpath_fails_test",
+)
+
+output_is_wire_gen_go_test(
+    name = "output_is_wire_gen_go_test",
+    target_under_test = "//wire/tests/fixture:wire_gen",
+)
+
+uninferable_importpath_fails_test(
+    name = "uninferable_importpath_fails_test",
+    target_under_test = "//wire/tests/nomirror:wire_gen",
+)
+
+ambiguous_importpath_fails_test(
+    name = "ambiguous_importpath_fails_test",
+    target_under_test = "//wire/tests/ambiguous:wire_gen",
+)

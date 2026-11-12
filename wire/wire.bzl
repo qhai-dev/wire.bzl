@@ -60,13 +60,7 @@ def _resolve_wire_tool(ctx):
         return ctx.executable.wire_tool
     fail(_NO_TOOLCHAIN_ERROR.format(label = ctx.label))
 
-# Fallback import path for the package under generation. Dependencies are
-# placed at their real import paths and every import in the generated file
-# refers to those, so the current package's own path is never visible in the
-# output. It still has to live under the right module prefix when the package
-# imports `internal` packages, which is why we try to infer the real path
-# below.
-_FALLBACK_IMPORT_PATH = "bazelgowire.invalid/input"
+
 
 def _infer_import_path(ctx, packages):
     """Infers the Go import path of the package being generated.
@@ -108,7 +102,26 @@ def _infer_import_path(ctx, packages):
 
     if len(candidates) == 1:
         return list(candidates.keys())[0]
-    return _FALLBACK_IMPORT_PATH
+
+    # A placeholder path used to be returned here. That silently produced a
+    # bogus import path, which only surfaced later as a confusing Wire error
+    # about `internal` packages. Fail with an actionable message instead.
+    if not candidates:
+        fail(
+            "{}: cannot infer importpath for the package under generation. ".format(ctx.label) +
+            "No same-repository dependency has a Go import path that mirrors its " +
+            "Bazel package path, so the module prefix is unknown. Set `importpath` " +
+            "explicitly, e.g. importpath = \"github.com/you/project/{}\".".format(prefix),
+        )
+
+    fail(
+        "{}: ambiguous importpath candidates: {}. ".format(
+            ctx.label,
+            ", ".join(sorted(candidates.keys())),
+        ) +
+        "The dependencies imply more than one module prefix. Set `importpath` " +
+        "explicitly to disambiguate.",
+    )
 
 def _collect_dependency_sources(ctx):
     """Returns {importpath: {"srcs": {path: File}, "embedsrcs": {path: File}}}.
@@ -265,10 +278,6 @@ _wire = rule(
             doc = "Go libraries imported by `srcs`. The transitive sources of " +
                   "these libraries are made available to Wire.",
         ),
-        "out": attr.output(
-            mandatory = True,
-            doc = "Generated Go file.",
-        ),
         "importpath": attr.string(
             doc = "Import path of the package under generation. Only needed " +
                   "when it cannot be inferred from the Bazel package layout, " +
@@ -296,13 +305,15 @@ _wire = rule(
             default = Label("@rules_go//:go_context_data"),
         ),
     },
+    # The output file name is fixed, matching Wire's own convention.
+    outputs = {"out": "wire_gen.go"},
     toolchains = [
         _GO_TOOLCHAIN,
         config_common.toolchain_type(_WIRE_TOOLCHAIN_TYPE, mandatory = False),
     ],
 )
 
-def wire(name, srcs, deps = [], out = "wire_gen.go", header_file = None, importpath = "", wire_tags = [], wire_tool = None, **kwargs):
+def wire(name, srcs, deps = [], header_file = None, importpath = "", wire_tags = [], wire_tool = None, **kwargs):
     """Generates `wire_gen.go` from the injectors declared in `srcs`.
 
     The generated file is exposed as the default output of this target, so it
@@ -334,8 +345,6 @@ def wire(name, srcs, deps = [], out = "wire_gen.go", header_file = None, importp
             `wireinject` build tag. A checked-in `wire_gen.go` must not be
             listed.
         deps: Go libraries imported by `srcs`.
-        out: name of the generated Go file. Must be a file name in the current
-            Bazel package, not a path.
         header_file: optional file inserted at the top of the generated file.
         importpath: import path of the package under generation. Usually
             inferred from the Bazel package layout; set it explicitly if the
@@ -345,15 +354,10 @@ def wire(name, srcs, deps = [], out = "wire_gen.go", header_file = None, importp
         wire_tool: optional override for the Wire executable.
         **kwargs: common attributes such as `visibility` and `testonly`.
     """
-    if not out.endswith(".go"):
-        fail("wire_gen: out must end in .go, got {}".format(out))
-    if "/" in out or "\\" in out:
-        fail("wire_gen: out must be a file in the current package, got {}".format(out))
     _wire(
         name = name,
         srcs = srcs,
         deps = deps,
-        out = out,
         header_file = header_file,
         importpath = importpath,
         wire_tags = wire_tags,

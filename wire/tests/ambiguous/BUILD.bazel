@@ -1,0 +1,12 @@
+load("//wire:defs.bzl", "wire_gen")
+
+# Two same-repository deps with different module prefixes -> ambiguous.
+wire_gen(
+    name = "wire_gen",
+    visibility = ["//wire/tests:__pkg__"],
+    srcs = ["wire.go"],
+    deps = [
+        "//wire/tests/ambiguous/a",
+        "//wire/tests/ambiguous/b",
+    ],
+)

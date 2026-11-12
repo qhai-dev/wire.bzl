@@ -1,10 +1,32 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@wire.bzl//wire:defs.bzl", "wire_gen")
+
+# Generates wire_gen.go from the injector in wire.go.
+# No toolchain registration needed: wire.bzl registers a default one.
+wire_gen(
+    name = "wire_gen",
+    srcs = ["wire.go"],
+    importpath = "github.com/qhai-dev/wire.bzl/e2e/smoke/cmd",
+    deps = [
+        "//internal/infra",
+        "//pkg/framework",
+        "@com_github_google_wire//:wire",
+    ],
+)
 
 go_library(
     name = "go_default_library",
-    srcs = ["main.go"],
+    srcs = [
+        "main.go",
+        ":wire_gen",
+    ],
     importpath = "github.com/qhai-dev/wire.bzl/e2e/smoke/cmd",
     visibility = ["//visibility:private"],
+    deps = [
+        "//internal/infra",
+        "//pkg/framework",
+        "@com_github_google_wire//:wire",
+    ],
 )
 
 go_binary(

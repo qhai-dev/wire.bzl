@@ -11,11 +11,10 @@ use_repo(go_deps, "com_github_google_wire")
 
 bazel_dep(name = "platforms", version = "1.1.0")
 
-# bazel_dep(
-#     name = "wire.bzl",
-#     version = "0.1.0",
-# )
-# local_path_override(
-#     module_name = "wire.bzl",
-#     path = "..",
-# )
+bazel_dep(name = "wire.bzl", version = "0.0.0")
+
+# e2e/smoke is two levels below the repository root.
+local_path_override(
+    module_name = "wire.bzl",
+    path = "../..",
+)

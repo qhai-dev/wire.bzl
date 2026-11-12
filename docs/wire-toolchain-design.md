@@ -532,12 +532,12 @@ extension 把根模块的注册排在前面，并用零填充索引前缀（`tc_
 
 ### 9.5 尚未实现（后续阶段）
 
-- `wire_gen` 规则本体重构：移除 `out` 属性（固定 `wire_gen.go`）、
-  改进 import path 推断的报错信息
-- E2E 测试改用 `wire_gen`（`e2e/smoke/cmd/BUILD.bazel` 目前仍未调用 wire 规则）
 - 交叉编译实测（`cfg = "exec"` 已按设计声明，但未在跨平台 target 上实跑验证）
 - GOPATH → Module 模式迁移
 - Gazelle 语言扩展
+
+> `wire_gen` 规则本体重构（移除 `out`、import path 报错）与 E2E 接入已于
+> 2026-11-12 完成并实测，详见 `design-review-and-improvements.md` 第八节。
 
 ---
 

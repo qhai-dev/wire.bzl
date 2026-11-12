@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "a",
+    srcs = ["lib.go"],
+    importpath = "example.com/moda/wire/tests/ambiguous/a",
+    visibility = ["//wire/tests/ambiguous:__pkg__"],
+)

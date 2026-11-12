@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//wire:defs.bzl", "wire_gen")
+
+go_library(
+    name = "greet",
+    srcs = ["greet.go"],
+    importpath = "github.com/qhai-dev/wire.bzl/wire/tests/fixture",
+    deps = ["@com_github_google_wire//:wire"],
+)
+
+wire_gen(
+    name = "wire_gen",
+    visibility = ["//wire/tests:__pkg__"],
+    srcs = ["wire.go"],
+    importpath = "github.com/qhai-dev/wire.bzl/wire/tests/fixture",
+    deps = [
+        ":greet",
+        "@com_github_google_wire//:wire",
+    ],
+)

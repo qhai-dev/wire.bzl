@@ -325,7 +325,7 @@ Wire 扩展通过 `language.GenerateResult.Gen` 返回的规则会合并到最�
 
 ## 三、当前实现中的设计缺陷
 
-### 3.1 Import Path 推断逻辑脆弱（严重）
+### 3.1 Import Path 推断逻辑脆弱（严重）— 已实现
 
 **现状：** `_infer_import_path` 遍历所有传递依赖，寻找
 "importpath 以 `/+package` 结尾"的候选，仅在恰好一个候选时返回结果，
@@ -482,7 +482,7 @@ for importpath in sorted(packages.keys()):
 - `replace` 路径必须是绝对路径或相对 `go.mod` 的路径
 - 改造后可移除整个 GOPATH 目录结构
 
-### 3.4 E2E 测试未实际使用 wire 规则（严重）
+### 3.4 E2E 测试未实际使用 wire 规则（严重）— 已实现
 
 **现状：** `e2e/smoke/cmd/BUILD.bazel` 只有普通 `go_library` + `go_binary`，
 完全没有调用 wire 规则。`wire.go` 存在但 `wire_gen.go` 从未被生成，
@@ -573,12 +573,12 @@ lines = [
 
 | 优先级 | 改造项 | 工作量 | 说明 |
 | --- | --- | --- | --- |
-| P0 | 重构 `wire_gen` 规则（统一 API） | 中 | 确定的最终 API |
-| P0 | 修复 E2E 测试 | 小 | 使用 `wire_gen` + `go_library` 组合 |
-| P0 | 清理 `BUILD.bazel` 语法错误 | 小 | 删除或修复根目录示例 |
+| P0 | 重构 `wire_gen` 规则（统一 API） | 中 | **已完成**：移除 `out`，输出固定 `wire_gen.go` |
+| P0 | 修复 E2E 测试 | 小 | **已完成**：`wire_gen` + `go_library` + `go_binary` |
+| P0 | 清理 `BUILD.bazel` 语法错误 | 小 | **已完成** |
 | P0 | 统一命名，删除废弃别名 | 小 | 仅保留 `wire_gen` |
-| P1 | 改进 import path 推断错误信息 | 小 | 推断失败时给出明确提示 |
-| P1 | 实现 Toolchain 抽象 | 中 | Module extension 注册 |
+| P1 | 改进 import path 推断错误信息 | 小 | **已完成**：无法推断/歧义均给出可操作报错 |
+| P1 | 实现 Toolchain 抽象 | 中 | **已完成**，见 `wire-toolchain-design.md` |
 
 ### Phase 2：Gazelle 扩展（v0.2.0）
 
@@ -735,3 +735,91 @@ gazelle = use_extension("@gazelle//:extensions.bzl", "gazelle")
 | `wire_gen` 单一生成规则 | 职责单一，组合自由，概念最少 |
 | Gazelle 扩展消除手工维护 | 自动化解决 deps 重复，与 Go 扩展协作 |
 | Toolchain 抽象 | 支持组织级版本管控和跨平台 |
+
+---
+
+## 八、规则完善实施记录（2026-11-12，TDD）
+
+按 TDD 完成 `wire_gen` 规则本体重构与 E2E 接入。
+
+### 8.1 新增测试
+
+`wire/tests/` 下基于 `bazel_skylib` 的 `analysistest`：
+
+| 测试 | 断言 | fixture |
+| --- | --- | --- |
+| `output_is_wire_gen_go_test` | 默认输出唯一且 basename 为 `wire_gen.go` | `fixture/`，显式 importpath |
+| `uninferable_importpath_fails_test` | 推断不出时报错含 `cannot infer importpath` | `nomirror/`，依赖 importpath 故意不镜像 Bazel 布局 |
+| `ambiguous_importpath_fails_test` | 多前缀时报错含 `ambiguous importpath` | `ambiguous/`，两个不同 module 前缀的同仓依赖 |
+
+运行：`bazel test //wire/tests:all`
+
+### 8.2 RED → GREEN 过程
+
+先写测试并观察失败，失败原因正确：
+
+```text
+In test _uninferable_importpath_fails_impl: Expected failure of
+target_under_test, but found success
+In test _ambiguous_importpath_fails_impl: Expected failure of
+target_under_test, but found success
+```
+
+即旧实现在推断失败时静默返回占位路径 `bazelgowire.invalid/input`，
+不报错。随后实现最小改动使其转绿。
+
+### 8.3 落地改动
+
+**import path 推断（`wire/wire.bzl`）**
+
+删除 `_FALLBACK_IMPORT_PATH`。推断失败分两种情况给出可操作报错：
+
+- 无候选：说明"没有同仓依赖的 Go import path 镜像其 Bazel 包路径"，
+  并给出可直接填写的 `importpath` 示例
+- 多候选：列出全部候选前缀，要求显式设置 `importpath` 消歧
+
+**输出固定（`wire/wire.bzl`）**
+
+移除 `out` 属性，改为规则级隐式输出 `outputs = {"out": "wire_gen.go"}`。
+宏签名去掉 `out` 参数及其路径校验（固定名后不再需要）。
+实测确认 `out = "custom.go"` 被拒绝：
+
+```text
+no such attribute 'out' in '_wire' rule
+```
+
+**E2E 接入（`e2e/smoke/`）**
+
+- `MODULE.bazel`：启用 `bazel_dep(name = "wire.bzl")` + `local_path_override`；
+  原先注释里的 `path = ".."` 层级是错的，`e2e/smoke` 距根两层，应为 `"../.."`
+- `cmd/BUILD.bazel`：改为 `wire_gen` + `go_library`（`srcs` 引用 `:wire_gen`）
+  + `go_binary`，不注册任何工具链（验证默认工具链零配置可用）
+
+### 8.4 验证结果
+
+| 项目 | 结果 |
+| --- | --- |
+| `bazel test //wire/tests:all`（强制 `--nocache_test_results`） | 3/3 通过 |
+| `out` 属性已移除 | 通过，报 `no such attribute 'out'` |
+| E2E `bazel build //cmd:app` | 通过，`wire_gen` action 执行并产出 `wire_gen.go` |
+| E2E 产物运行 | 通过，输出 `Hello, Wire!` |
+| E2E 生成代码 | 正确，带 `//go:build !wireinject`，注入器含 error 分支 |
+
+### 8.5 环境注意事项（实测踩到）
+
+- `proxy.golang.org` 不可达，需 `GOPROXY=https://goproxy.cn,direct`
+- Bazel 的 `--output_user_root` 不能放在 OSS 挂载上（不支持符号链接）；
+  仓库本身在 OSS 上时，还需 `--symlink_prefix` 把便捷符号链接重定向到本地盘
+- 跨模块验证建议加 `--repository_cache`，否则每个 workspace 会各自重下全部依赖
+
+### 8.6 仍未完成
+
+- 交叉编译实测（`cfg = "exec"` 已声明，未在跨平台 target 上实跑）
+- GOPATH → Module 模式迁移
+- Shell 脚本健壮性增强（清理、输出校验、跨平台）
+- Gazelle 语言扩展
+- `wire_check` / `wire_diff` test 规则
+
+---
+
+内容由 AI 生成
