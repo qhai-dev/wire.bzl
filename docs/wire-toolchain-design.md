@@ -453,11 +453,92 @@ github.com/google/wire/cmd/wire: read .../pkg/mod/cache/download/
 
 1. 是否接受 toolchain type + module extension 作为主路径，`wire_tool` 降级为
    deprecated 逃生舱？
-2. 是否由本仓库提供一个"默认工具链"（默认指向 `@com_github_google_wire//cmd/wire`），
-   让用户在未显式注册时也能工作？还是强制要求显式注册以保证可解释性？
+2. ~~是否由本仓库提供一个"默认工具链"？~~ **已决策：提供默认工具链。**
+   本仓库内置默认工具链指向 `@com_github_google_wire//cmd/wire:wire`，
+   用户零配置即可使用；需要换版本或自定义仓库名时再显式注册覆盖。
 3. ~~是否先实测 rules_go `go_tool`，若可用则以其作为默认实现底层？~~
    **已实测关闭**：rules_go 0.65.0 无 `go_tool` 规则；官方 `tool` 运行器非
    hermetic。二者均不纳入实现，详见第六节。
 4. 多版本共存是否需要在 `v0.1.0` 支持，还是仅保证"单版本 + 明确报错"？
 5. `wire` 工具编译失败（例如 Wire 版本与项目 Go SDK 不兼容）时，错误信息
    是否需要额外包装，还是直接透传 rules_go 的编译错误？
+
+---
+
+## 九、实现状态（2026-11-12，已实测）
+
+工具链已实现并在 Bazel 9.2.0 + rules_go 0.65.0 + gazelle 2.0.0-beta.2 上实测通过。
+
+### 9.1 落地文件
+
+| 文件 | 职责 |
+| --- | --- |
+| `wire/toolchain.bzl` | `wire_toolchain` rule，提供 `ToolchainInfo(wire, wire_files)`，`wire` 属性为 `cfg = "exec"` |
+| `wire/BUILD.bazel` | `wire_toolchain_type` + 内置默认工具链 `default_wire_toolchain` |
+| `wire/extensions.bzl` | module extension，供显式注册覆盖默认工具链 |
+| `wire/defs.bzl` | 公共入口，导出 `wire_gen` / `wire_toolchain`（`wire` 保留为兼容别名） |
+| `wire/wire.bzl` | 接入三级解析：工具链 → `wire_tool` 逃生舱 → 可操作报错 |
+| `MODULE.bazel` | `register_toolchains("//wire:default_wire_toolchain")` |
+| `BUILD.bazel` | 修掉原有语法错误（缺逗号、不存在的 `@bazel_gowire` load），否则 `//:go.mod` 无法加载会阻塞整个构建 |
+
+### 9.2 关键实现细节
+
+**可选工具链类型。** 用 `config_common.toolchain_type(..., mandatory = False)`
+声明，这样未注册时由我们自己给出可操作报错，而不是 Bazel 的通用
+"no matching toolchain found"；同时保证 `wire_tool` 逃生舱仍可用。
+
+**`wire_tool` 默认值改为 `None`。** 原实现默认值硬编码，导致无法区分
+"用户显式设置"与"沿用默认"，三级解析无法成立。
+
+**extension 中的 canonical label。** 生成的仓库看不到其他模块的 apparent name，
+因此：`str(Label("//wire:toolchain.bzl"))` 在本文件所属模块求值，得到 canonical
+label；tag 的 `attr.label` 值由 Bazel 在声明该 tag 的模块上下文中解析，
+`str(tag.wire)` 已自带 canonical 仓库名。实测生成结果：
+
+```starlark
+load("@@wire.bzl+//wire:toolchain.bzl", "wire_toolchain")
+
+wire_toolchain(
+    name = "tc_00_wire_impl",
+    wire = "@@gazelle++go_deps+com_github_google_wire//cmd/wire:wire",
+)
+
+toolchain(
+    name = "tc_00_wire",
+    toolchain = ":tc_00_wire_impl",
+    toolchain_type = "@@wire.bzl+//wire:wire_toolchain_type",
+)
+```
+
+**注册顺序。** Bazel 按注册顺序解析工具链，且 `:all` 按字典序展开。
+extension 把根模块的注册排在前面，并用零填充索引前缀（`tc_00_`、`tc_01_`）
+让展开顺序与优先级一致，避免"最后注册者获胜"的隐式行为。
+
+### 9.3 实测结果
+
+| 场景 | 结果 |
+| --- | --- |
+| 零配置（消费方不写任何 `register_toolchains`） | 通过。`wire_gen` → `go_library` → `go_binary` 全链路构建成功，产物运行输出 `hello toolchain` |
+| 生成产物正确性 | 通过。`wire_gen.go` 带 `//go:build !wireinject`，注入器实现正确 |
+| 显式注册覆盖（移除内置默认，仅留用户注册） | 通过。构建成功，证明 extension 注册路径可独立工作 |
+| 两者均未注册 | 通过。给出本文 3.5 节设计的可操作报错，含可复制的 `MODULE.bazel` 片段 |
+
+### 9.4 实测中发现并修复的两个 Starlark 陷阱
+
+| 问题 | 现象 | 修正 |
+| --- | --- | --- |
+| Starlark list 无 `.sort()` | `'list' value has no field or method 'sort'` | 改用 `sorted(entries, key = ...)` |
+| Starlark `format()` 不支持宽度/补零说明符 | `Error in format: Missing argument ':02d'` | 手工补零后字符串拼接 |
+
+### 9.5 尚未实现（后续阶段）
+
+- `wire_gen` 规则本体重构：移除 `out` 属性（固定 `wire_gen.go`）、
+  改进 import path 推断的报错信息
+- E2E 测试改用 `wire_gen`（`e2e/smoke/cmd/BUILD.bazel` 目前仍未调用 wire 规则）
+- 交叉编译实测（`cfg = "exec"` 已按设计声明，但未在跨平台 target 上实跑验证）
+- GOPATH → Module 模式迁移
+- Gazelle 语言扩展
+
+---
+
+内容由 AI 生成

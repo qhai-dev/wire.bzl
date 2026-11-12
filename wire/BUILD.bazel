@@ -1,0 +1,38 @@
+load(":toolchain.bzl", "wire_toolchain")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "defs.bzl",
+    "extensions.bzl",
+    "toolchain.bzl",
+    "wire.bzl",
+])
+
+# Abstract identity that `wire_gen` resolves against.
+toolchain_type(
+    name = "wire_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+# Default toolchain: lets `wire_gen` work with zero configuration.
+#
+# The label follows the mapping that Gazelle's `go_deps` extension computes for
+# a `tool` directive in go.mod: the target name is the basename of the tool's
+# import path, so `github.com/google/wire/cmd/wire` becomes
+# `@com_github_google_wire//cmd/wire:wire`.
+#
+# Projects that pin a different Wire version, or use a custom repository name,
+# override this by registering their own toolchain earlier in the resolution
+# order (see wire/extensions.bzl).
+wire_toolchain(
+    name = "default_wire_toolchain_impl",
+    wire = "@com_github_google_wire//cmd/wire:wire",
+)
+
+toolchain(
+    name = "default_wire_toolchain",
+    toolchain = ":default_wire_toolchain_impl",
+    toolchain_type = ":wire_toolchain_type",
+    visibility = ["//visibility:public"],
+)

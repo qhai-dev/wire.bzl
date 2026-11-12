@@ -1,0 +1,10 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/qhai-dev/wire.bzl
+gazelle(name = "gazelle")
+
+# Consumed by the go_deps extension in MODULE.bazel.
+exports_files([
+    "go.mod",
+    "go.sum",
+])

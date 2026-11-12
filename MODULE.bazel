@@ -11,3 +11,8 @@ bazel_dep(name = "gazelle", version = "2.0.0-beta.2")
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
 use_repo(go_deps, "com_github_google_wire")
+
+# Default Wire toolchain, so `wire_gen` works with zero configuration.
+# Projects can override it by registering their own toolchain earlier via
+# @wire.bzl//wire:extensions.bzl.
+register_toolchains("//wire:default_wire_toolchain")

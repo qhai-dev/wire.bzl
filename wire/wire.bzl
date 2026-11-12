@@ -20,7 +20,45 @@ load("@rules_go//go:def.bzl", "GoArchive", "go_context")
 
 _GO_TOOLCHAIN = Label("@rules_go//go:toolchain")
 
-_DEFAULT_WIRE_TOOL = Label("@com_github_google_wire//cmd/wire")
+# Declared as an optional toolchain type so that a missing registration produces
+# our own actionable diagnostic (and the `wire_tool` escape hatch keeps working)
+# instead of Bazel's generic "no matching toolchain found" error.
+_WIRE_TOOLCHAIN_TYPE = Label("//wire:wire_toolchain_type")
+
+_NO_TOOLCHAIN_ERROR = """\
+{label}: no Wire toolchain is registered and `wire_tool` was not set.
+
+Wire ships no prebuilt binary; the executable is compiled from the Go module
+source pinned in go.mod. Make sure the Wire module is available:
+
+    go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+    go_deps.from_file(go_mod = "//:go.mod")
+    use_repo(go_deps, "com_github_google_wire")
+
+The `wire.bzl` module registers a default toolchain, so this normally works with
+no extra configuration. To pin a specific Wire version or repository name,
+register your own:
+
+    wire = use_extension("@wire.bzl//wire:extensions.bzl", "wire")
+    wire.toolchain(wire = "@com_github_google_wire//cmd/wire:wire")
+    use_repo(wire, "wire_bzl_toolchains")
+    register_toolchains("@wire_bzl_toolchains//:all")
+"""
+
+def _resolve_wire_tool(ctx):
+    """Returns the Wire executable, preferring toolchain resolution.
+
+    Resolution order (see docs/wire-toolchain-design.md):
+      1. the registered Wire toolchain
+      2. an explicitly set `wire_tool` attribute (escape hatch)
+      3. fail with an actionable message
+    """
+    toolchain_info = ctx.toolchains[_WIRE_TOOLCHAIN_TYPE]
+    if toolchain_info != None:
+        return toolchain_info.wire
+    if ctx.executable.wire_tool != None:
+        return ctx.executable.wire_tool
+    fail(_NO_TOOLCHAIN_ERROR.format(label = ctx.label))
 
 # Fallback import path for the package under generation. Dependencies are
 # placed at their real import paths and every import in the generated file
@@ -118,6 +156,7 @@ def _copy_commands(dest_dir, files):
 def _wire_impl(ctx):
     go = go_context(ctx, include_deprecated_properties = False)
     sdk = go.sdk
+    wire_exe = _resolve_wire_tool(ctx)
 
     if ctx.outputs.out.basename in [src.basename for src in ctx.files.srcs]:
         fail(
@@ -148,7 +187,7 @@ def _wire_impl(ctx):
         # sandbox; `go list` is invoked by Wire through go/packages.
         'export GOROOT="$EXEC_ROOT/' + sdk.root_file.dirname + '"',
         'export PATH="$EXEC_ROOT/' + sdk.go.dirname + ':${PATH:-}"',
-        'export WIRE="$EXEC_ROOT/' + ctx.executable.wire_tool.path + '"',
+        'export WIRE="$EXEC_ROOT/' + wire_exe.path + '"',
         'mkdir -p "$GOPATH" "$GOCACHE" "$TMPDIR" "$HOME"',
     ]
 
@@ -203,7 +242,7 @@ def _wire_impl(ctx):
             direct = input_files,
             transitive = [sdk.srcs, sdk.headers, sdk.tools],
         ),
-        tools = [ctx.executable.wire_tool, sdk.go],
+        tools = [wire_exe, sdk.go],
         command = "\n".join(lines),
         env = env,
         mnemonic = "GoWireGen",
@@ -246,17 +285,21 @@ _wire = rule(
                   "`wire gen -tags`. `wireinject` is added automatically.",
         ),
         "wire_tool": attr.label(
-            default = _DEFAULT_WIRE_TOOL,
             executable = True,
             cfg = "exec",
-            doc = "The `wire` command to run. Defaults to the CLI built from " +
-                  "`@com_github_google_wire//cmd/wire`.",
+            doc = "Escape hatch: run this `wire` executable instead of the one " +
+                  "from toolchain resolution. Normally leave unset; the " +
+                  "registered Wire toolchain is used. Intended for temporarily " +
+                  "testing a locally patched Wire.",
         ),
         "_go_context_data": attr.label(
             default = Label("@rules_go//:go_context_data"),
         ),
     },
-    toolchains = [_GO_TOOLCHAIN],
+    toolchains = [
+        _GO_TOOLCHAIN,
+        config_common.toolchain_type(_WIRE_TOOLCHAIN_TYPE, mandatory = False),
+    ],
 )
 
 def wire(name, srcs, deps = [], out = "wire_gen.go", header_file = None, importpath = "", wire_tags = [], wire_tool = None, **kwargs):
@@ -303,11 +346,9 @@ def wire(name, srcs, deps = [], out = "wire_gen.go", header_file = None, importp
         **kwargs: common attributes such as `visibility` and `testonly`.
     """
     if not out.endswith(".go"):
-        fail("gowire: out must end in .go, got {}".format(out))
+        fail("wire_gen: out must end in .go, got {}".format(out))
     if "/" in out or "\\" in out:
-        fail("gowire: out must be a file in the current package, got {}".format(out))
-    if wire_tool == None:
-        wire_tool = _DEFAULT_WIRE_TOOL
+        fail("wire_gen: out must be a file in the current package, got {}".format(out))
     _wire(
         name = name,
         srcs = srcs,
